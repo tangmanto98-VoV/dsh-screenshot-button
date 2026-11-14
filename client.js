@@ -35,6 +35,8 @@ window.__ModuleLoader__.load({
       primary: '\u4e3b\u5c4f',
       loading: '\u6b63\u5728\u8bfb\u53d6\u5c4f\u5e55\u2026',
       change: '\u66f4\u6362\u5c4f\u5e55\uff08\u53f3\u952e\u6216\u70b9\u7bad\u5934\uff09',
+      region: '\u81ea\u7531\u6846\u9009\uff08\u8de8\u5c4f\uff09',
+      regionHint: '\u62d6\u52a8\uff0cEsc \u53d6\u6d88',
     }
 
     /** Resolve a Host route against the directory the page is served from. */
@@ -58,24 +60,51 @@ window.__ModuleLoader__.load({
       }
     }
 
-    function readStoredTarget() {
+    /**
+     * The remembered choice: `{ target: index | 'all' | 'region' }` or
+     * `{ rect: 'x,y,width,height' }` for a rectangle that was framed once.
+     * Older values (`all`, `2`) are still read.
+     */
+    function readStoredSpec() {
       try {
         const raw = window.localStorage.getItem(STORAGE_KEY)
-        if (raw === null) return null
-        if (raw === 'all') return 'all'
-        const index = Number.parseInt(raw, 10)
-        return Number.isFinite(index) && index >= 0 ? index : null
+        if (raw === null || raw === '') return null
+        if (raw.charAt(0) === '{') {
+          const parsed = JSON.parse(raw)
+          if (parsed === null || typeof parsed !== 'object') return null
+          if (typeof parsed.rect === 'string' && parsed.rect !== '') return { rect: parsed.rect }
+          if (parsed.target === 'all' || parsed.target === 'region') return { target: parsed.target }
+          const index = Number.parseInt(String(parsed.target), 10)
+          return Number.isFinite(index) && index >= 0 ? { target: index } : null
+        }
+        if (raw === 'all' || raw === 'region') return { target: raw }
+        const legacy = Number.parseInt(raw, 10)
+        return Number.isFinite(legacy) && legacy >= 0 ? { target: legacy } : null
       } catch {
         return null
       }
     }
 
-    function writeStoredTarget(value) {
+    function writeStoredSpec(spec) {
       try {
-        window.localStorage.setItem(STORAGE_KEY, String(value))
+        window.localStorage.setItem(STORAGE_KEY, JSON.stringify(spec))
       } catch {
         // A blocked storage area only costs the remembered choice.
       }
+    }
+
+    /** How a remembered choice is named in diagnostics. */
+    function describeSpec(spec) {
+      if (spec === null || spec === undefined) return 'spec=none'
+      if (typeof spec.rect === 'string') return `rect=${spec.rect}`
+      return `target=${String(spec.target)}`
+    }
+
+    /** `x,y,width,height` -> `width x height`, for the menu hint. */
+    function rectSize(rect) {
+      const parts = String(rect).split(',')
+      if (parts.length !== 4) return ''
+      return `${parts[2]}\u00d7${parts[3]}`
     }
 
     function decodeBase64(base64) {
@@ -113,8 +142,10 @@ window.__ModuleLoader__.load({
     }
 
     /** Ask the Host for a capture and deliver it to the composer's intake. */
-    async function attachScreenshot(target) {
-      const query = new URLSearchParams({ target: String(target) })
+    async function attachScreenshot(spec) {
+      const query = new URLSearchParams()
+      if (spec !== null && spec !== undefined && typeof spec.rect === 'string') query.set('rect', spec.rect)
+      else query.set('target', String(spec === null || spec === undefined ? 'all' : spec.target))
       const response = await fetch(`${route(CAPTURE_PATH)}?${query.toString()}`, {
         cache: 'no-store',
         credentials: 'same-origin',
@@ -129,6 +160,7 @@ window.__ModuleLoader__.load({
       if (payload === null || payload.ok !== true) {
         throw new Error(payload && payload.error ? String(payload.error) : `HTTP ${response.status}`)
       }
+      if (payload.cancelled === true) return { cancelled: true, bytes: 0, mediaType: '', rect: null }
       const mediaType = typeof payload.mediaType === 'string' ? payload.mediaType : 'image/png'
       const bytes = decodeBase64(String(payload.base64 ?? ''))
       const file = new File([bytes], fileName(mediaType), { type: mediaType })
@@ -144,7 +176,12 @@ window.__ModuleLoader__.load({
         }
       }
       document.dispatchEvent(event)
-      return { bytes: bytes.length, mediaType }
+      return {
+        cancelled: false,
+        bytes: bytes.length,
+        mediaType,
+        rect: typeof payload.rect === 'string' ? payload.rect : null,
+      }
     }
 
     function cameraIcon(phase) {
@@ -242,7 +279,8 @@ window.__ModuleLoader__.load({
       const [phase, setPhase] = React.useState('idle')
       const [hovered, setHovered] = React.useState(false)
       const [error, setError] = React.useState('')
-      const [target, setTarget] = React.useState(readStoredTarget)
+      const [spec, setSpec] = React.useState(readStoredSpec)
+      const [lastRect, setLastRect] = React.useState(null)
       const [menu, setMenu] = React.useState(null)
       const [monitors, setMonitors] = React.useState(null)
       const [menuError, setMenuError] = React.useState('')
@@ -304,8 +342,16 @@ window.__ModuleLoader__.load({
         setError('')
         attachScreenshot(next)
           .then((result) => {
-            report(`attached target=${String(next)} ${result.mediaType} ${result.bytes} bytes`)
             if (!alive.current) return
+            if (result.cancelled === true) {
+              report(`cancelled ${describeSpec(next)}`)
+              setPhase('idle')
+              return
+            }
+            report(`attached ${describeSpec(next)} ${result.mediaType} ${result.bytes} bytes`)
+            // Remember only the size, as a menu hint: a plain click should
+            // always ask for a fresh rectangle instead of silently reusing one.
+            if (typeof result.rect === 'string' && result.rect !== '') setLastRect(result.rect)
             setPhase('done')
             window.setTimeout(() => {
               if (alive.current) setPhase('idle')
@@ -313,7 +359,7 @@ window.__ModuleLoader__.load({
           })
           .catch((failure) => {
             const message = String(failure && failure.message ? failure.message : failure)
-            report(`failed target=${String(next)} ${message}`)
+            report(`failed ${describeSpec(next)} ${message}`)
             if (!alive.current) return
             setError(message)
             setPhase('error')
@@ -349,17 +395,17 @@ window.__ModuleLoader__.load({
       }
 
       const choose = (next) => {
-        writeStoredTarget(next)
-        setTarget(next)
+        writeStoredSpec(next)
+        setSpec(next)
         capture(next)
       }
 
       const onPrimary = () => {
-        if (target === null) {
+        if (spec === null) {
           openMenu()
           return
         }
-        capture(target)
+        capture(spec)
       }
 
       const label =
@@ -436,8 +482,8 @@ window.__ModuleLoader__.load({
                       {
                         key: 'all',
                         label: string('allScreens'),
-                        active: target === 'all',
-                        onSelect: () => choose('all'),
+                        active: spec !== null && spec.target === 'all',
+                        onSelect: () => choose({ target: 'all' }),
                       },
                     ),
                 monitors === null
@@ -447,10 +493,22 @@ window.__ModuleLoader__.load({
                         key: `m${String(monitor.index)}`,
                         label: `${string('screen')} ${position + 1}${monitor.primary === true ? ` · ${string('primary')}` : ''}`,
                         hint: `${monitor.width}\u00d7${monitor.height}`,
-                        active: target === monitor.index,
-                        onSelect: () => choose(monitor.index),
+                        active:
+                          spec !== null && typeof spec.rect !== 'string' && spec.target === monitor.index,
+                        onSelect: () => choose({ target: monitor.index }),
                       }),
                     ),
+                h('div', {
+                  key: 'divider',
+                  style: { height: '1px', margin: '5px 8px', background: 'rgba(127, 127, 127, 0.22)' },
+                }),
+                h(MenuRow, {
+                  key: 'region',
+                  label: string('region'),
+                  hint: lastRect === null ? string('regionHint') : rectSize(lastRect),
+                  active: spec !== null && spec.target === 'region',
+                  onSelect: () => choose({ target: 'region' }),
+                }),
                 menuError === ''
                   ? null
                   : h(

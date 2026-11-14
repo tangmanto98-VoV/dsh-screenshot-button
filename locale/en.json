@@ -1,15 +1,17 @@
 {
   "meta": {
     "title": "Screenshot button",
-    "description": "Adds a camera button next to the composer's send action. It captures one chosen monitor — or every screen when you ask — and attaches the image to the draft, so a screenshot can be sent without a second app. The chosen screen is remembered, so the usual case stays one click. Nothing is written to disk and the image only leaves the machine if the message is sent."
+    "description": "Adds a camera button next to the composer's send action. It captures one chosen monitor, every screen at once, or any rectangle you drag across several screens, and attaches the image to the draft, so a screenshot can be sent without a second app. The chosen screen — or the last rectangle — is remembered, so the usual case stays one click. Nothing is written to disk and the image only leaves the machine if the message is sent."
   },
   "title": "Capture a screen and attach it",
   "busy": "Capturing the screen…",
   "failed": "Screenshot failed",
-  "choose": "Choose the screen to capture",
+  "choose": "Choose what to capture",
   "allScreens": "All screens",
   "screen": "Screen",
   "primary": "primary",
   "loading": "Reading the screen list…",
-  "change": "right-click or the arrow to change"
+  "change": "right-click or the arrow to change",
+  "region": "Free region (any size)",
+  "regionHint": "drag, Esc to cancel"
 }

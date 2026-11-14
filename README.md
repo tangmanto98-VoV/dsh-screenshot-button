@@ -1,8 +1,8 @@
 # dsh-screenshot-button
 
-A camera button in the DeepSeek Harness composer that captures **one chosen monitor** — or every screen — and attaches the image to your draft, so a screenshot goes to the agent without opening a second app first.
+A camera button in the DeepSeek Harness composer that captures **one chosen monitor**, **every screen**, or **any rectangle you drag across several screens**, and attaches the image to your draft, so a screenshot goes to the agent without opening a second app first.
 
-在 DeepSeek Harness 的输入框里加一个相机按钮：只截你选中的那一块屏幕（也可以截全部屏幕），图片直接进草稿的附件栏，不用再借微信或截图工具中转。
+在 DeepSeek Harness 的输入框里加一个相机按钮：截你选中的那一块屏幕、全部屏幕，或者用鼠标跨屏拖出来的任意大小一块，图片直接进草稿的附件栏，不用再借微信或截图工具中转。
 
 ## Install
 
@@ -22,9 +22,11 @@ The button sits in the composer toolbar, between the model selector and Send.
 
 | Action | Result |
 |---|---|
-| Click the camera | Captures the screen you chose last time |
-| Click the small arrow, or right-click the camera | Opens the screen list: **All screens** plus one row per monitor |
-| Pick a row | Captures immediately and remembers that choice for next time |
+| Click the camera | Captures what you chose last time: a screen, all screens, or the last framed rectangle |
+| Click the small arrow, or right-click the camera | Opens the list: **All screens**, one row per monitor, then **Free region (any size)** |
+| Pick a monitor row or **All screens** | Captures immediately and remembers that choice |
+| Pick **Free region** | The screen freezes and the pointer becomes a crosshair: drag any rectangle — it may cross monitor edges — and release to capture it |
+| Right-click or Esc while selecting | Cancels; nothing is captured |
 | Esc / click elsewhere | Closes the list without capturing |
 
 While capturing, the camera becomes a spinner (about one second per monitor). On success the icon flashes green and a thumbnail appears in the draft's attachment rail — exactly as if you had pasted the image from the clipboard. Send it like any other message. On failure the icon turns red and the reason appears above it.
@@ -35,7 +37,7 @@ Nothing is captured until you click, and nothing leaves the machine until you se
 
 1. The Host half (`index.js`) registers two routes on `ctx.webServer`:
    - `GET /dsh-screenshot/monitors` — the monitor layout from `Screen.AllScreens`
-   - `GET /dsh-screenshot/capture?target=<index|all>` — one capture, returned as JSON with a base64 image
+   - `GET /dsh-screenshot/capture?target=<index|all|region>` — one capture, returned as JSON with a base64 image; `?rect=x,y,width,height` re-captures one rectangle without asking
 2. The capture itself is a PowerShell + `System.Drawing` helper that enters a per-monitor DPI awareness context, copies the requested screen with `CopyFromScreen`, scales it to a 3000 px longest edge, and encodes PNG — falling back to JPEG and then to a smaller frame until it fits a 4 MB budget. The compiled helper is cached in `%TEMP%` so later clicks skip the C# compile.
 3. The browser half (`client.js`) wraps those bytes in a `File` and dispatches one synthetic `paste` event on the document. The app's own paste intake therefore handles it exactly like a clipboard image: attachment rail, upload progress, retry, and delivery all stay inside the harness.
 4. The chosen screen is stored in `localStorage` under `dsh-screenshot-button:target`.
@@ -45,7 +47,7 @@ No file is written to disk; the image exists only as bytes on its way into the d
 ## Limitations
 
 - **Windows only.** There is no macOS or Linux capture path.
-- **Whole monitors, not regions.** There is no window or rectangle selection.
+- **Free region freezes the screen.** The rectangle is cut out of a still taken the moment you pick the mode, so anything that moves during the drag is not recorded — the same behaviour as the Windows snipping tool. There is no window or control snapping.
 - **One occupant of the activity seat.** The button uses `conversation.input.activity`, which hosts a single control, so the experimental voice-input plugin cannot occupy it at the same time.
 - **4 MB budget per capture.** Larger screens are downscaled (or re-encoded as JPEG) until they fit; a 4K portrait monitor typically lands as JPEG at native resolution.
 - **Diagnostics** are appended to `%TEMP%\dsh-screenshot-button.log` by both halves; a failed click writes the reason there.

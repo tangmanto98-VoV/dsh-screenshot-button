@@ -1,11 +1,12 @@
 /**
  * Screenshot button — Host half.
  *
- * Two routes: one lists the monitors, one captures a chosen monitor (or the
- * whole virtual desktop). A capture answers with a JSON envelope carrying a
- * base64 image, because a text-only bridge cannot be trusted with raw binary
- * bodies. The browser half (`client.js`) posts those bytes into the composer
- * through the app's own paste intake.
+ * Three routes: one lists the monitors, one captures a chosen monitor (or the
+ * whole virtual desktop), and one lets the pointer drag any rectangle across
+ * every screen. A capture answers with a JSON envelope carrying a base64
+ * image, because a text-only bridge cannot be trusted with raw binary bodies.
+ * The browser half (`client.js`) posts those bytes into the composer through
+ * the app's own paste intake.
  */
 import { execFile } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
@@ -25,10 +26,13 @@ const LOG_PATH = '/dsh-screenshot/client-log'
 const MAX_WIDTH = 3000
 /** Hard byte budget for one capture, so admission limits stay satisfied. */
 const MAX_BYTES = 4_000_000
+/** One capture finishes in about a second; the interactive selector waits for the pointer. */
+const CAPTURE_TIMEOUT_MS = 90_000
+const REGION_TIMEOUT_MS = 300_000
 /** Where both halves record what happened; read it when the button misbehaves. */
 const LOG_FILE = join(tmpdir(), 'dsh-screenshot-button.log')
 /** Cached helper assembly, so later clicks skip the C# compile. */
-const DLL_FILE = join(tmpdir(), 'dsh-screenshot-button-capture-v2.dll')
+const DLL_FILE = join(tmpdir(), 'dsh-screenshot-button-capture-v3.dll')
 
 function log(line) {
   try {
@@ -39,6 +43,7 @@ function log(line) {
 }
 
 const HELPER_SOURCE = String.raw`using System;
+using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
@@ -54,6 +59,9 @@ public static class DshScreenshotButton
     [DllImport("user32.dll")]
     private static extern IntPtr SetThreadDpiAwarenessContext(IntPtr dpiContext);
 
+    [DllImport("user32.dll")]
+    private static extern bool SetForegroundWindow(IntPtr window);
+
     private static IntPtr EnterPerMonitor()
     {
         IntPtr previous = IntPtr.Zero;
@@ -67,6 +75,14 @@ public static class DshScreenshotButton
             throw new InvalidOperationException("could not enter a per-monitor DPI awareness context");
         }
         return previous;
+    }
+
+    private static void RestorePerMonitor(IntPtr previous)
+    {
+        if (previous != IntPtr.Zero)
+        {
+            try { SetThreadDpiAwarenessContext(previous); } catch { }
+        }
     }
 
     public static string Describe()
@@ -99,10 +115,7 @@ public static class DshScreenshotButton
         }
         finally
         {
-            if (previous != IntPtr.Zero)
-            {
-                try { SetThreadDpiAwarenessContext(previous); } catch { }
-            }
+            RestorePerMonitor(previous);
         }
     }
 
@@ -147,6 +160,40 @@ public static class DshScreenshotButton
         return scaled;
     }
 
+    /** Fit the frame into the byte budget: native PNG, then JPEG, then smaller frames. */
+    private static string EncodeWithinBudget(Bitmap source, int maxWidth, int maxBytes)
+    {
+        double baseScale = maxWidth > 0 && source.Width > maxWidth
+            ? (double)maxWidth / (double)source.Width
+            : 1.0;
+
+        for (int attempt = 0; attempt < 7; attempt++)
+        {
+            double scale = baseScale * Math.Pow(0.72, attempt);
+            int width = Math.Max(1, (int)Math.Round(source.Width * scale));
+            int height = Math.Max(1, (int)Math.Round(source.Height * scale));
+
+            using (Bitmap frame = Render(source, width, height))
+            {
+                byte[] png = Encode(frame, false);
+                if (png.Length <= maxBytes) return "image/png\n" + Convert.ToBase64String(png);
+                byte[] jpeg = Encode(frame, true);
+                if (jpeg.Length <= maxBytes) return "image/jpeg\n" + Convert.ToBase64String(jpeg);
+            }
+        }
+        throw new InvalidOperationException("no screenshot encodes within the byte budget");
+    }
+
+    /** Put the absolute rectangle on the header line: "<media>[;rect=x,y,w,h]\n<base64>". */
+    private static string WithRect(string encoded, Rectangle absolute)
+    {
+        int split = encoded.IndexOf('\n');
+        if (split < 0) return encoded;
+        string media = encoded.Substring(0, split);
+        string data = encoded.Substring(split + 1);
+        return media + ";rect=" + absolute.X + "," + absolute.Y + "," + absolute.Width + "," + absolute.Height + "\n" + data;
+    }
+
     public static string Capture(int target, int maxWidth, int maxBytes)
     {
         IntPtr previous = EnterPerMonitor();
@@ -173,33 +220,262 @@ public static class DshScreenshotButton
                 {
                     screen.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
                 }
-
-                double baseScale = maxWidth > 0 && bounds.Width > maxWidth
-                    ? (double)maxWidth / (double)bounds.Width
-                    : 1.0;
-
-                for (int attempt = 0; attempt < 7; attempt++)
-                {
-                    double scale = baseScale * Math.Pow(0.72, attempt);
-                    int width = Math.Max(1, (int)Math.Round(bounds.Width * scale));
-                    int height = Math.Max(1, (int)Math.Round(bounds.Height * scale));
-
-                    using (Bitmap frame = Render(full, width, height))
-                    {
-                        byte[] png = Encode(frame, false);
-                        if (png.Length <= maxBytes) return "image/png\n" + Convert.ToBase64String(png);
-                        byte[] jpeg = Encode(frame, true);
-                        if (jpeg.Length <= maxBytes) return "image/jpeg\n" + Convert.ToBase64String(jpeg);
-                    }
-                }
+                return EncodeWithinBudget(full, maxWidth, maxBytes);
             }
-            throw new InvalidOperationException("no screenshot encodes within the byte budget");
         }
         finally
         {
-            if (previous != IntPtr.Zero)
+            RestorePerMonitor(previous);
+        }
+    }
+
+    /** Re-capture one exact rectangle, in virtual-screen pixels. */
+    public static string CaptureRect(int x, int y, int width, int height, int maxWidth, int maxBytes)
+    {
+        if (width <= 0 || height <= 0)
+        {
+            throw new InvalidOperationException("the requested rectangle has no drawable area");
+        }
+        IntPtr previous = EnterPerMonitor();
+        try
+        {
+            using (Bitmap region = new Bitmap(width, height))
             {
-                try { SetThreadDpiAwarenessContext(previous); } catch { }
+                using (Graphics screen = Graphics.FromImage(region))
+                {
+                    screen.CopyFromScreen(x, y, 0, 0, new Size(width, height));
+                }
+                return WithRect(EncodeWithinBudget(region, maxWidth, maxBytes), new Rectangle(x, y, width, height));
+            }
+        }
+        finally
+        {
+            RestorePerMonitor(previous);
+        }
+    }
+
+    /**
+     * Freeze the whole virtual desktop, let the pointer drag a rectangle on it,
+     * and return that rectangle. The selection layer is one borderless window
+     * spanning every monitor, so a drag can cross screen edges; Esc or a
+     * right-click returns "cancel".
+     */
+    public static string SelectRegion(int maxWidth, int maxBytes)
+    {
+        IntPtr previous = EnterPerMonitor();
+        try
+        {
+            Rectangle bounds = SystemInformation.VirtualScreen;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+            {
+                throw new InvalidOperationException("no drawable screen area");
+            }
+
+            using (Bitmap full = new Bitmap(bounds.Width, bounds.Height))
+            {
+                using (Graphics screen = Graphics.FromImage(full))
+                {
+                    screen.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
+                }
+
+                Rectangle selection;
+                using (RegionSelector selector = new RegionSelector(full, bounds))
+                {
+                    if (selector.ShowDialog() != DialogResult.OK) return "cancel";
+                    selection = selector.Selection;
+                }
+                if (selection.Width < 2 || selection.Height < 2) return "cancel";
+
+                using (Bitmap cropped = new Bitmap(selection.Width, selection.Height))
+                {
+                    using (Graphics target = Graphics.FromImage(cropped))
+                    {
+                        target.DrawImage(full, new Rectangle(0, 0, selection.Width, selection.Height), selection, GraphicsUnit.Pixel);
+                    }
+                    Rectangle absolute = new Rectangle(bounds.X + selection.X, bounds.Y + selection.Y, selection.Width, selection.Height);
+                    return WithRect(EncodeWithinBudget(cropped, maxWidth, maxBytes), absolute);
+                }
+            }
+        }
+        finally
+        {
+            RestorePerMonitor(previous);
+        }
+    }
+
+    /**
+     * The dragging layer: the frozen desktop drawn over every monitor at 1:1,
+     * dimmed outside the rectangle, with the live pixel size beside it.
+     */
+    public class RegionSelector : Form
+    {
+        private readonly Bitmap source;
+        private Point anchor;
+        private Rectangle selection;
+        private bool dragging;
+
+        public Rectangle Selection { get { return selection; } }
+
+        public RegionSelector(Bitmap source, Rectangle virtualBounds)
+        {
+            this.source = source;
+            AutoScaleMode = AutoScaleMode.None;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+            FormBorderStyle = FormBorderStyle.None;
+            StartPosition = FormStartPosition.Manual;
+            Bounds = virtualBounds;
+            TopMost = true;
+            ShowInTaskbar = false;
+            KeyPreview = true;
+            Cursor = Cursors.Cross;
+            BackColor = Color.Black;
+            DoubleBuffered = true;
+            Text = "DSH region selector";
+        }
+
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            try { SetForegroundWindow(Handle); } catch { }
+            try { Activate(); } catch { }
+            Invalidate();
+        }
+
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right) { Cancel(); return; }
+            if (e.Button != MouseButtons.Left) return;
+            dragging = true;
+            anchor = e.Location;
+            selection = Rectangle.Empty;
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            if (!dragging) return;
+            Rectangle previous = selection;
+            selection = Normalize(anchor, e.Location);
+            Invalidate(RepaintFor(previous, selection));
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            if (!dragging || e.Button != MouseButtons.Left) return;
+            dragging = false;
+            Rectangle previous = selection;
+            selection = Normalize(anchor, e.Location);
+            Invalidate(RepaintFor(previous, selection));
+            if (selection.Width < 2 || selection.Height < 2) { Cancel(); return; }
+            DialogResult = DialogResult.OK;
+            Close();
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape) { Cancel(); return; }
+            base.OnKeyDown(e);
+        }
+
+        private void Cancel()
+        {
+            DialogResult = DialogResult.Cancel;
+            Close();
+        }
+
+        private static Rectangle Normalize(Point from, Point to)
+        {
+            return Rectangle.FromLTRB(
+                Math.Min(from.X, to.X),
+                Math.Min(from.Y, to.Y),
+                Math.Max(from.X, to.X),
+                Math.Max(from.Y, to.Y));
+        }
+
+        /** A dirty region that also covers the size badge and the border. */
+        private static Rectangle RepaintFor(Rectangle previous, Rectangle current)
+        {
+            Rectangle union = Rectangle.Union(previous, current);
+            if (union.Width <= 0 || union.Height <= 0) union = Rectangle.FromLTRB(current.Left, current.Top, current.Right, current.Bottom);
+            union.Inflate(190, 80);
+            return union;
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            Graphics graphics = e.Graphics;
+            Rectangle clip = e.ClipRectangle;
+            graphics.DrawImage(source, clip, clip, GraphicsUnit.Pixel);
+
+            using (SolidBrush veil = new SolidBrush(Color.FromArgb(118, 0, 0, 0)))
+            {
+                foreach (Rectangle band in Subtract(clip, selection))
+                {
+                    if (band.Width > 0 && band.Height > 0) graphics.FillRectangle(veil, band);
+                }
+            }
+
+            if (selection.Width > 0 && selection.Height > 0)
+            {
+                using (Pen border = new Pen(Color.FromArgb(255, 96, 165, 250), 2f))
+                {
+                    graphics.DrawRectangle(border, selection.Left, selection.Top,
+                        Math.Max(1, selection.Width - 1), Math.Max(1, selection.Height - 1));
+                }
+                DrawBadge(graphics, selection.Width + " \u00d7 " + selection.Height, selection.Left, selection.Top, true);
+            }
+            else
+            {
+                DrawBadge(graphics, "\u62d6\u52a8\u6846\u9009\uff08\u53ef\u8df3\u5c4f\u5e55\uff09 \u00b7 \u53f3\u952e\u6216 Esc \u53d6\u6d88", 24, 24, false);
+            }
+        }
+
+        private void DrawBadge(Graphics graphics, string text, int x, int y, bool above)
+        {
+            Font font = SystemFonts.MessageBoxFont;
+            Size measured = TextRenderer.MeasureText(text, font);
+            int width = measured.Width + 12;
+            int height = measured.Height + 6;
+            int left = x;
+            int top = above ? y - height - 6 : y;
+            if (top < 2) top = above ? y + 4 : 2;
+            if (left + width > ClientSize.Width - 2) left = Math.Max(2, ClientSize.Width - width - 2);
+            if (left < 2) left = 2;
+
+            Rectangle box = new Rectangle(left, top, width, height);
+            using (SolidBrush background = new SolidBrush(Color.FromArgb(214, 17, 17, 20)))
+            {
+                graphics.FillRectangle(background, box);
+            }
+            TextRenderer.DrawText(graphics, text, font, box, Color.FromArgb(255, 244, 244, 245),
+                TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter | TextFormatFlags.NoPadding);
+        }
+
+        /** The parts of "outer" that fall outside "inner". */
+        private static IEnumerable<Rectangle> Subtract(Rectangle outer, Rectangle inner)
+        {
+            if (outer.Width <= 0 || outer.Height <= 0) yield break;
+            Rectangle overlap = Rectangle.Intersect(outer, inner);
+            if (overlap.Width <= 0 || overlap.Height <= 0)
+            {
+                yield return outer;
+                yield break;
+            }
+            if (overlap.Top > outer.Top)
+            {
+                yield return Rectangle.FromLTRB(outer.Left, outer.Top, outer.Right, overlap.Top);
+            }
+            if (overlap.Bottom < outer.Bottom)
+            {
+                yield return Rectangle.FromLTRB(outer.Left, overlap.Bottom, outer.Right, outer.Bottom);
+            }
+            if (overlap.Left > outer.Left)
+            {
+                yield return Rectangle.FromLTRB(outer.Left, overlap.Top, overlap.Left, overlap.Bottom);
+            }
+            if (overlap.Right < outer.Right)
+            {
+                yield return Rectangle.FromLTRB(overlap.Right, overlap.Top, outer.Right, overlap.Bottom);
             }
         }
     }
@@ -239,14 +515,18 @@ function powershellExecutable() {
   return join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
 }
 
-/** Run one helper call and resolve its trimmed stdout. */
-function runHelper(call) {
+/**
+ * Run one helper call and resolve its trimmed stdout.
+ * @param call - C# expression printed to stdout.
+ * @param timeoutMs - how long the child may run; the selector waits for a drag.
+ */
+function runHelper(call, timeoutMs = CAPTURE_TIMEOUT_MS) {
   const encoded = Buffer.from(buildScript(call), 'utf16le').toString('base64')
   return new Promise((resolve, reject) => {
     execFile(
       powershellExecutable(),
       ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', encoded],
-      { timeout: 90_000, windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' },
+      { timeout: timeoutMs, windowsHide: true, maxBuffer: 64 * 1024 * 1024, encoding: 'utf8' },
       (error, stdout, stderr) => {
         if (error) {
           const detail = String(stderr || error.message || '').trim().split(/\r?\n/).slice(-3).join(' | ')
@@ -264,6 +544,31 @@ function parseTarget(raw) {
   if (raw === null || raw === '' || raw === 'all') return -1
   const index = Number.parseInt(raw, 10)
   return Number.isFinite(index) && index >= 0 ? index : -1
+}
+
+/** Resolve a `rect=x,y,width,height` query value, in virtual-screen pixels. */
+function parseRect(raw) {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const parts = raw.split(',').map((value) => Number.parseInt(value, 10))
+  if (parts.length !== 4 || parts.some((value) => !Number.isFinite(value))) return null
+  const [x, y, width, height] = parts
+  if (width < 2 || height < 2) return null
+  return { x, y, width, height }
+}
+
+/** Split `<media>[;rect=x,y,w,h]\n<base64>` into its parts. */
+function parseEnvelope(text) {
+  const split = text.indexOf('\n')
+  if (split === -1) throw new Error('the capture helper returned no image')
+  const header = text.slice(0, split).trim()
+  const base64 = text.slice(split + 1).replace(/\s+/g, '')
+  const fields = header.split(';')
+  const mediaType = fields[0].trim()
+  let rect = null
+  for (const field of fields.slice(1)) {
+    if (field.startsWith('rect=')) rect = field.slice(5).trim()
+  }
+  return { mediaType, base64, rect }
 }
 
 let busy = false
@@ -287,6 +592,9 @@ export function apply(ctx) {
       response.end(body)
     }
 
+    const notAllowed = (response) => sendJson(response, 405, { ok: false, error: 'method not allowed' })
+    const allowed = (request) => request.method === 'GET' || request.method === 'HEAD'
+
     hostCtx.effect(() => {
       const disposers = []
 
@@ -295,8 +603,8 @@ export function apply(ctx) {
           kind: 'exact',
           path: MONITORS_PATH,
           handler(request, response) {
-            if (request.method !== 'GET' && request.method !== 'HEAD') {
-              sendJson(response, 405, { ok: false, error: 'method not allowed' })
+            if (!allowed(request)) {
+              notAllowed(response)
               return
             }
             runHelper('[DshScreenshotButton]::Describe()')
@@ -321,34 +629,56 @@ export function apply(ctx) {
           kind: 'exact',
           path: CAPTURE_PATH,
           handler(request, response) {
-            if (request.method !== 'GET' && request.method !== 'HEAD') {
-              sendJson(response, 405, { ok: false, error: 'method not allowed' })
+            if (!allowed(request)) {
+              notAllowed(response)
               return
             }
-            let target = -1
+
+            let call
+            let label
+            let timeoutMs = CAPTURE_TIMEOUT_MS
             try {
-              target = parseTarget(new URL(String(request.url ?? ''), 'http://127.0.0.1').searchParams.get('target'))
+              const url = new URL(String(request.url ?? ''), 'http://127.0.0.1')
+              const rawTarget = url.searchParams.get('target')
+              const rect = parseRect(url.searchParams.get('rect'))
+              if (rect !== null) {
+                // Repeat an exact rectangle: no selection layer, just the crop.
+                label = `rect=${rect.x},${rect.y},${rect.width},${rect.height}`
+                call = `[DshScreenshotButton]::CaptureRect(${rect.x}, ${rect.y}, ${rect.width}, ${rect.height}, ${MAX_WIDTH}, ${MAX_BYTES})`
+              } else if (rawTarget === 'region') {
+                label = 'region'
+                timeoutMs = REGION_TIMEOUT_MS
+                call = `[DshScreenshotButton]::SelectRegion(${MAX_WIDTH}, ${MAX_BYTES})`
+              } else {
+                const target = parseTarget(rawTarget)
+                label = `target=${target}`
+                call = `[DshScreenshotButton]::Capture(${target}, ${MAX_WIDTH}, ${MAX_BYTES})`
+              }
             } catch {
-              target = -1
+              label = 'target=-1'
+              call = `[DshScreenshotButton]::Capture(-1, ${MAX_WIDTH}, ${MAX_BYTES})`
             }
-            log(`capture request target=${target}`)
+
+            log(`capture request ${label}`)
             if (busy) {
               sendJson(response, 429, { ok: false, error: 'a capture is already running' })
               return
             }
             busy = true
-            runHelper(`[DshScreenshotButton]::Capture(${target}, ${MAX_WIDTH}, ${MAX_BYTES})`)
+            runHelper(call, timeoutMs)
               .then((text) => {
-                const split = text.indexOf('\n')
-                if (split === -1) throw new Error('the capture helper returned no image')
-                const mediaType = text.slice(0, split).trim()
-                const base64 = text.slice(split + 1).replace(/\s+/g, '')
-                log(`capture ok target=${target} ${mediaType} ${base64.length} base64 chars`)
-                sendJson(response, 200, { ok: true, mediaType, base64, target })
+                if (text === 'cancel') {
+                  log(`capture cancelled ${label}`)
+                  sendJson(response, 200, { ok: true, cancelled: true, target: label })
+                  return
+                }
+                const { mediaType, base64, rect } = parseEnvelope(text)
+                log(`capture ok ${label} ${mediaType} ${base64.length} base64 chars${rect === null ? '' : ` rect=${rect}`}`)
+                sendJson(response, 200, { ok: true, mediaType, base64, target: label, rect })
               })
               .catch((error) => {
                 const message = String(error && error.message ? error.message : error)
-                log(`capture failed: ${message}`)
+                log(`capture failed ${label}: ${message}`)
                 sendJson(response, 500, { ok: false, error: message })
               })
               .finally(() => {
