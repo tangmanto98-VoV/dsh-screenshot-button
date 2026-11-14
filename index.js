@@ -11,6 +11,7 @@ import { execFile } from 'node:child_process'
 import { appendFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 export const name = 'dsh-screenshot-button'
 
@@ -375,7 +376,7 @@ export function apply(ctx) {
         }),
       )
 
-      log(`mounted ${MONITORS_PATH} and ${CAPTURE_PATH}`)
+      log(`mounted ${MONITORS_PATH} and ${CAPTURE_PATH} from ${fileURLToPath(import.meta.url)}`)
       return () => {
         for (const dispose of disposers) {
           try {
