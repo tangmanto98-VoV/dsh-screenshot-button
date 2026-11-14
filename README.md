@@ -74,6 +74,8 @@ The package is plain ESM and hand-written browser code — no build step. Edit `
 
 If you installed the profile copy instead of linking the checkout, re-copy the changed files into the profile before re-applying the bundle.
 
+The C# helper is written to `%TEMP%\dsh-screenshot-button-helper-v3.cs` and invoked through `powershell -EncodedCommand`. The source is kept out of the command line on purpose: Windows caps that line at 32767 characters, and passing the source inline fails as `spawn ENAMETOOLONG`, which reads like a missing tool rather than a long argument.
+
 ## License
 
 MIT

@@ -9,7 +9,7 @@
  * the app's own paste intake.
  */
 import { execFile } from 'node:child_process'
-import { appendFileSync } from 'node:fs'
+import { appendFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -31,6 +31,13 @@ const CAPTURE_TIMEOUT_MS = 90_000
 const REGION_TIMEOUT_MS = 300_000
 /** Where both halves record what happened; read it when the button misbehaves. */
 const LOG_FILE = join(tmpdir(), 'dsh-screenshot-button.log')
+/**
+ * The helper's C# source, written to disk for every call: `-EncodedCommand`
+ * carries the whole script on the Windows command line, and that line is capped
+ * at 32767 characters — the selector pushed the source past it (ENAMETOOLONG).
+ * The call itself now only refers to this file.
+ */
+const HELPER_SOURCE_FILE = join(tmpdir(), 'dsh-screenshot-button-helper-v3.cs')
 /** Cached helper assembly, so later clicks skip the C# compile. */
 const DLL_FILE = join(tmpdir(), 'dsh-screenshot-button-capture-v3.dll')
 
@@ -487,7 +494,9 @@ function quotePowerShellSingle(value) {
 
 /**
  * Build the helper script: reuse the cached assembly, otherwise compile it,
- * then run one call whose result is printed on stdout.
+ * then run one call whose result is printed on stdout. The C# source is read
+ * from {@link HELPER_SOURCE_FILE} instead of being embedded here, so the
+ * command line stays far below the Windows limit.
  * @param call - C# expression printed to stdout.
  */
 function buildScript(call) {
@@ -495,7 +504,7 @@ function buildScript(call) {
     "$ErrorActionPreference = 'Stop'",
     'Add-Type -AssemblyName System.Windows.Forms,System.Drawing',
     `$dll = ${quotePowerShellSingle(DLL_FILE)}`,
-    `$source = @'\n${HELPER_SOURCE}\n'@`,
+    `$source = [IO.File]::ReadAllText(${quotePowerShellSingle(HELPER_SOURCE_FILE)}, [Text.Encoding]::UTF8)`,
     '$referenced = @("System.Windows.Forms.dll", "System.Drawing.dll")',
     '$loaded = $false',
     'if (Test-Path -LiteralPath $dll) {',
@@ -521,7 +530,20 @@ function powershellExecutable() {
  * @param timeoutMs - how long the child may run; the selector waits for a drag.
  */
 function runHelper(call, timeoutMs = CAPTURE_TIMEOUT_MS) {
+  try {
+    writeFileSync(HELPER_SOURCE_FILE, HELPER_SOURCE, 'utf8')
+  } catch (error) {
+    const detail = String(error && error.message ? error.message : error)
+    return Promise.reject(new Error(`could not write the helper source: ${detail}`))
+  }
+
   const encoded = Buffer.from(buildScript(call), 'utf16le').toString('base64')
+  // The Windows command line caps at 32767 characters; spawn fails with
+  // ENAMETOOLONG, which reads like a missing tool rather than a long argument.
+  if (encoded.length > 30_000) {
+    return Promise.reject(new Error(`the helper command line is too long (${encoded.length} characters)`))
+  }
+
   return new Promise((resolve, reject) => {
     execFile(
       powershellExecutable(),
