@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="36" height="36" viewBox="0 0 36 36" role="img" aria-label="Screenshot button">
+  <g fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M6.4 10.9h4.2l2.1-3.5h10.6l2.1 3.5h4.2a3.2 3.2 0 0 1 3.2 3.2v11.3a3.2 3.2 0 0 1-3.2 3.2H6.4a3.2 3.2 0 0 1-3.2-3.2V14.1a3.2 3.2 0 0 1 3.2-3.2Z" stroke="#33405c" stroke-width="2.2"/>
+    <circle cx="18" cy="20" r="5.4" stroke="#2f7fd1" stroke-width="2.2"/>
+    <circle cx="28.4" cy="14.6" r="1.3" fill="#2f7fd1"/>
+  </g>
+</svg>

@@ -1,0 +1,56 @@
+{
+  "name": "dsh-screenshot-button",
+  "version": "0.1.0",
+  "description": "A camera button in the DeepSeek Harness composer that captures one chosen monitor, or every screen, and attaches the image to the draft.",
+  "license": "MIT",
+  "author": "tangmanto98-VoV",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tangmanto98-VoV/dsh-screenshot-button.git"
+  },
+  "homepage": "https://github.com/tangmanto98-VoV/dsh-screenshot-button#readme",
+  "bugs": {
+    "url": "https://github.com/tangmanto98-VoV/dsh-screenshot-button/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "screenshot",
+    "screen-capture",
+    "composer",
+    "windows"
+  ],
+  "engines": {
+    "dsh": ">=0.2.2-rc.1 <0.3.0-0"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "assets",
+    "README.md",
+    "LICENSE",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
+    }
+  }
+}
