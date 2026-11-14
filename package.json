@@ -1,7 +1,7 @@
 {
   "name": "dsh-screenshot-button",
-  "version": "0.2.1",
-  "description": "A camera button in the DeepSeek Harness composer that captures one chosen monitor, or every screen, and attaches the image to the draft.",
+  "version": "0.2.2",
+  "description": "A camera button in the DeepSeek Harness composer that captures one chosen monitor, every screen, or any rectangle you drag across several screens, and attaches the image to the draft.",
   "license": "MIT",
   "author": "tangmanto98-VoV",
   "type": "module",
