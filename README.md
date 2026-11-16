@@ -35,9 +35,12 @@ Nothing is captured until you click, and nothing leaves the machine until you se
 
 ## How it works
 
-1. The Host half (`index.js`) registers two routes on `ctx.webServer`:
+1. The Host half (`index.js`) registers three routes on `ctx.webServer`:
    - `GET /dsh-screenshot/monitors` — the monitor layout from `Screen.AllScreens`
    - `GET /dsh-screenshot/capture?target=<index|all|region>` — one capture, returned as JSON with a base64 image; `?rect=x,y,width,height` re-captures one rectangle without asking
+   - `GET /dsh-screenshot/log?message=…` — best-effort client diagnostics
+
+   Every route asks the composition's `connection` service for a rejection first (`ctx.connection.requestRejection(req)`). That Host/Origin fence answers DNS-rebinding and cross-site callers with **403**, and callers without a live browser session with **401**, so a foreign page cannot drive a capture even though it can reach the loopback port.
 2. The capture itself is a PowerShell + `System.Drawing` helper that enters a per-monitor DPI awareness context, copies the requested screen with `CopyFromScreen`, scales it to a 3000 px longest edge, and encodes PNG — falling back to JPEG and then to a smaller frame until it fits a 4 MB budget. The compiled helper is cached in `%TEMP%` so later clicks skip the C# compile.
 3. The browser half (`client.js`) wraps those bytes in a `File` and dispatches one synthetic `paste` event on the document. The app's own paste intake therefore handles it exactly like a clipboard image: attachment rail, upload progress, retry, and delivery all stay inside the harness.
 4. The chosen screen is stored in `localStorage` under `dsh-screenshot-button:target`.

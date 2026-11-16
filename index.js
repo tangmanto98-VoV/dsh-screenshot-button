@@ -600,9 +600,10 @@ let busy = false
  * @param ctx - Host context.
  */
 export function apply(ctx) {
-  ctx.inject(['webServer'], (hostCtx) => {
+  ctx.inject(['webServer', 'connection'], (hostCtx) => {
     const webServer = hostCtx.webServer
-    if (webServer === undefined) return
+    const connection = hostCtx.connection
+    if (webServer === undefined || connection === undefined) return
 
     const sendJson = (response, status, payload) => {
       const body = JSON.stringify(payload)
@@ -617,6 +618,23 @@ export function apply(ctx) {
     const notAllowed = (response) => sendJson(response, 405, { ok: false, error: 'method not allowed' })
     const allowed = (request) => request.method === 'GET' || request.method === 'HEAD'
 
+    /**
+     * Apply the composition's Host/Origin fence and browser authentication.
+     * Without it `webServer.register` routes are reachable from any page that
+     * can reach the loopback port (DNS rebinding / cross-site requests), which
+     * would let foreign pages drive a screen capture.
+     * @returns whether the request was rejected (the response is already sent).
+     */
+    const rejected = (request, response) => {
+      const rejection = connection.requestRejection(request)
+      if (rejection === undefined) return false
+      sendJson(response, rejection, {
+        ok: false,
+        error: rejection === 403 ? 'untrusted origin' : 'authentication required',
+      })
+      return true
+    }
+
     hostCtx.effect(() => {
       const disposers = []
 
@@ -625,6 +643,7 @@ export function apply(ctx) {
           kind: 'exact',
           path: MONITORS_PATH,
           handler(request, response) {
+            if (rejected(request, response)) return
             if (!allowed(request)) {
               notAllowed(response)
               return
@@ -651,6 +670,7 @@ export function apply(ctx) {
           kind: 'exact',
           path: CAPTURE_PATH,
           handler(request, response) {
+            if (rejected(request, response)) return
             if (!allowed(request)) {
               notAllowed(response)
               return
@@ -715,6 +735,7 @@ export function apply(ctx) {
           kind: 'exact',
           path: LOG_PATH,
           handler(request, response) {
+            if (rejected(request, response)) return
             let message = ''
             try {
               message = new URL(String(request.url ?? ''), 'http://127.0.0.1').searchParams.get('message') ?? ''
